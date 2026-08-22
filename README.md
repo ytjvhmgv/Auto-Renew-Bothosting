@@ -2,7 +2,7 @@
 
 这是一个基于 GitHub Actions 的自动化脚本，用于定时登录自动续期 [Bot-hosting](https://bot-hosting.net) 服务。
 
-⚠️ 有cf盾,太垃圾的机房节点可能过不了，建议用稍微干净点的节点,[B2proxy住宅代理](https://www.b2proxy.com/signup?code=0F5133)
+🌐 网络走 **Cloudflare WARP**（与 Wispbyte 相同：`fscarmen/warp-on-actions` + `warp-cli`），不再使用 sing-box / `NODE_LINK` 代理。系统级 WARP 出口有助于通过 Cloudflare 盾。
 
 ━━━━━━━━━━━━━━━━━━━━━━
 
@@ -14,7 +14,6 @@
 | SESSION_TOKEN      | ❌ 可选  | Bot-hosting session_token，cookie里获取               |
 | DISCORD_TOKEN      | ✅ 必填  | Discord Token，SESSION_TOKEN失效时自动OAuth登录        |
 | GH_TOKEN           | ❌ 可选  | GitHub(classic) token,用于自动更新session_token,以ghp_xxx开头|
-| NODE_LINK          | ❌ 可选  | 代理链接（如 vless:// vmess:// trojan:// hysteria2:// tuic:// anytls:// socks5:// )|
 | TG_BOT_TOKEN       | ❌ 可选  | Telegram Bot Token（用于发送通知）                      |
 | TG_CHAT_ID         | ❌ 可选  | Telegram Chat ID（接收通知的用户或群组 ID）               |
 
@@ -26,6 +25,17 @@
 2：在`setting`➡`secrets and variables`➡`Actions` 里添加上方必填的secrets
 
 3：去actions菜单手动试运行工作流,根据自己的服务到期日期自行在[renew.yml](.github/workflows/renew.yml)里调整cron运行时间
+
+### 网络说明
+工作流会在运行脚本前启用 Cloudflare WARP：
+
+- Action：`fscarmen/warp-on-actions@v1.4`
+- `mode: client`（安装官方 `warp-cli`，便于更换 IP）
+- `stack: dual`（IPv4 + IPv6）
+
+浏览器和 Discord API 都走系统 WARP 出口，无需再配置 `vless://` / `vmess://` / SOCKS 等节点。登录若被 Cloudflare 拦截或触发 IP 风控，脚本会自动重启 WARP 更换 IP 并重试（最多 3 次）。
+
+若仓库里还留着旧的 `NODE_LINK` Secret，可以删掉，已经不再使用。
 
 ### SESSION_TOKEN 获取
 登录你的账号,按F12或页面空白处 右键➡检查➡选择应用程序或appcations 找到对应的字段点击获取对应的值，详情如图
@@ -58,7 +68,6 @@
 
 ## 注意事项
 * 必填变量必须要填写
-* NODE_LINK支持的代理协议有：vmess,vless,hysteria2,tuic,anytls,socks5等
 * 自动续期不代表可以无底线的薅羊毛,不建议多账号
 * cron运行时间不一定准确,得根据实际到期时间修改,可在设置里暂停actions功能再开启
 
