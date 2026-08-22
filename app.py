@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, re, sys, time, json, requests, subprocess
+import os, re, sys, time, json, shutil, requests, subprocess
 import urllib.request, urllib.parse, urllib.error
 from datetime import datetime
 from seleniumbase import SB
@@ -138,14 +138,17 @@ def wait_for_turnstile_pass(sb, timeout=30):
     print("❌ Turnstile 验证超时未通过")
     return False
     
-# 获取当前出口ip
-def get_current_ip(proxy_server: str = "") -> str:
-    proxies = None
-    if proxy_server:
-        proxies = {"http": proxy_server, "https": proxy_server}
-    response = requests.get("https://api.ip.sb/ip", proxies=proxies, timeout=15)
-    response.raise_for_status()
-    return response.text.strip()
+# 获取当前出口ip（WARP 为系统级网络，无需再走代理）
+def get_current_ip() -> str:
+    last_err = None
+    for url in ("https://api.ip.sb/ip", "https://api.ipify.org"):
+        try:
+            response = requests.get(url, timeout=15)
+            response.raise_for_status()
+            return response.text.strip()
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(last_err)
 
 # 时间格式化
 def format_countdown(countdown_str: str) -> str:
@@ -258,15 +261,8 @@ def discord_authorize(state: str) -> str:
         },
     })
 
-    # 如果配置了代理，Discord API 请求也走代理
-    proxies = None
-    _is_proxy = os.environ.get("IS_PROXY", "false").lower() == "true"
-    _proxy_server = os.environ.get("PROXY_SERVER", "").strip() or "http://127.0.0.1:1080"
-    if _is_proxy:
-        proxies = {"http": _proxy_server, "https": _proxy_server}
-
     try:
-        resp = requests.post(authorize_url, headers=headers, data=body, proxies=proxies, timeout=20)
+        resp = requests.post(authorize_url, headers=headers, data=body, timeout=20)
         if resp.status_code != 200:
             print(f"❌ Discord OAuth2 授权失败: HTTP {resp.status_code} - {resp.text[:300]}")
             return ""
@@ -341,29 +337,68 @@ def do_discord_login(sb) -> bool:
     return False
 
 
-# 主流程
-def main():
-    print("#" * 25)
-    print("   Bot-hosting 自动续期")
-    print("#" * 25)
+# ===== Cloudflare WARP 网络 =====
 
-    IS_PROXY = os.environ.get("IS_PROXY", "false").lower() == "true"
-    PROXY_SERVER = os.environ.get("PROXY_SERVER", "").strip() or "http://127.0.0.1:1080"
-    HEADLESS = os.environ.get("HEADLESS", "false").lower() == "true" 
+def restart_warp():
+    """断开并重新注册 WARP，更换出口 IP（与 Wispbyte 相同做法）。"""
+    if not shutil.which("warp-cli"):
+        print("⚠️ 未找到 warp-cli，跳过 WARP 重连（本地直连运行时无需此步骤）")
+        return False
+    print("🔄 正在重启 WARP 以更换 IP...")
+    try:
+        old_ip = get_current_ip()
+        print(f"📍 当前 IP: {old_ip}")
+    except Exception:
+        old_ip = "未知"
 
+    try:
+        subprocess.run(
+            ["sudo", "warp-cli", "--accept-tos", "disconnect"],
+            check=False, timeout=30, capture_output=True,
+        )
+        time.sleep(3)
+        try:
+            subprocess.run(
+                ["sudo", "warp-cli", "--accept-tos", "registration", "delete"],
+                check=True, timeout=30, capture_output=True,
+            )
+        except subprocess.CalledProcessError:
+            print("⚠️ 删除 WARP 注册失败（可能未注册），继续...")
+        subprocess.run(
+            ["sudo", "warp-cli", "--accept-tos", "registration", "new"],
+            check=True, timeout=30, capture_output=True,
+        )
+        time.sleep(3)
+        subprocess.run(
+            ["sudo", "warp-cli", "--accept-tos", "connect"],
+            check=True, timeout=30, capture_output=True,
+        )
+        time.sleep(10)
+        new_ip = get_current_ip()
+        print(f"✅ WARP 重连成功，新 IP: {new_ip}")
+        return True
+    except FileNotFoundError:
+        print("⚠️ 未找到 warp-cli，跳过 WARP 重连（本地直连运行时无需此步骤）")
+        return False
+    except Exception as e:
+        print(f"❌ WARP 重连失败: {e}")
+        return False
+
+
+# 主流程（单次浏览器会话：登录 + 续期）
+def run_browser_session() -> bool:
+    print("🌐 使用 Cloudflare WARP 网络（系统级，不再使用 sing-box 代理）")
+
+    HEADLESS = os.environ.get("HEADLESS", "false").lower() == "true"
     sb_kwargs = {"uc": True, "headless": HEADLESS}
 
-    if IS_PROXY:
-        print(f"🔗 挂载代理: {PROXY_SERVER}")
-        sb_kwargs["proxy"] = PROXY_SERVER
-    else:
-        print("🍭 未使用代理，直连访问")
-
     global _LOGIN_METHOD
+    _LOGIN_METHOD = "SESSION_TOKEN"
 
+    print("🚀 启动浏览器...")
     with SB(**sb_kwargs) as sb:
         try:
-            ip = get_current_ip(PROXY_SERVER if IS_PROXY else "")
+            ip = get_current_ip()
             print(f"📍 当前出口IP: {ip}")
         except Exception as e:
             print(f"⚠️ 获取出口 IP 失败: {e}")
@@ -372,7 +407,6 @@ def main():
 
         # 方式1: SESSION_TOKEN Cookie 登录（默认）
         if SESSION_TOKEN:
-            print("🚀 启动浏览器...")
             sb.open("https://bot-hosting.net/")
             sb.wait_for_ready_state_complete()
             sb.sleep(2)
@@ -423,8 +457,8 @@ def main():
                 error_msg = "Discord OAuth 登录失败"
             elif SESSION_TOKEN and DC_TOKEN:
                 error_msg = "SESSION_TOKEN 和 Discord OAuth 均失败"
-            send_telegram_message(format_notification("❌ 登录失败", error=error_msg))
-            return
+            print(f"❌ 登录失败: {error_msg}")
+            return False
 
         if _LOGIN_METHOD == "Discord Token":
             print("ℹ️ 本次使用 Discord OAuth 登录，新的 SESSION_TOKEN 将自动更新到 Secrets")
@@ -475,7 +509,7 @@ def main():
             except Exception as e:
                 print(f"❌ 点击外部按钮失败: {e}")
                 send_telegram_message(format_notification("❌ 续期失败", error="点击外部续期按钮出错"))
-                return
+                return True
 
             # 处理弹窗中的 Turnstile
             print("🔒 检测弹窗中的 Turnstile 验证...")
@@ -496,7 +530,7 @@ def main():
             if not turnstile_passed:
                 print("❌ Turnstile 验证最终未通过，脚本退出")
                 send_telegram_message(format_notification("❌ 续期失败", error="Turnstile 验证未通过"))
-                return
+                return True
 
             # 点击续期按钮
             print("⏳ 等待续期按钮可用并点击...")
@@ -589,6 +623,32 @@ def main():
             print("✅ SESSION_TOKEN 无需更新")
         
         print("🏁 脚本执行完毕")
+        return True
+
+
+def main():
+    print("#" * 25)
+    print("   Bot-hosting 自动续期")
+    print("#" * 25)
+
+    max_attempts = 3
+    last_error = "Cookie 已失效或页面异常"
+    for attempt in range(1, max_attempts + 1):
+        print(f"\n🔁 第 {attempt}/{max_attempts} 次尝试")
+        if attempt > 1:
+            print("先更换 WARP IP 再重新登录...")
+            if not restart_warp():
+                print("⚠️ WARP 未能更换 IP，停止重试")
+                break
+        if run_browser_session():
+            return
+
+    if not SESSION_TOKEN and DC_TOKEN:
+        last_error = "Discord OAuth 登录失败"
+    elif SESSION_TOKEN and DC_TOKEN:
+        last_error = "SESSION_TOKEN 和 Discord OAuth 均失败"
+    print("\n❌ 多次尝试后仍登录失败，终止后续续期操作。")
+    send_telegram_message(format_notification("❌ 登录失败", error=last_error))
 
 if __name__ == "__main__":
     main()
